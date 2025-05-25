@@ -40,9 +40,12 @@ resource "docker_image" "app" {
     platform   = "linux/amd64"
   }
 
-  # Re-build only when something inside Docker context changes
+  # Re-build only when one of these files changes
   triggers = {
-    dir_sha1 = filesha1("Dockerfile") # add more files if needed
+    build_hash = sha1(join("", [
+      filesha1("Dockerfile"),
+      filesha1("app.py"),
+    ]))
   }
 }
 
