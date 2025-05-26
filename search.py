@@ -12,6 +12,8 @@ import httpx
 import json
 import os
 
+openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
 
 def transform_query(query: str, openai_key: str) -> Dict[str, Any]:
     """Transform query using GPT-4.1-mini with structured JSON output."""
@@ -44,7 +46,7 @@ Rules:
 
     with httpx.Client() as client:
         response = client.post(
-            "https://api.openai.com/v1/chat/completions",
+            f"{openai_base_url}/chat/completions",
             headers={"Authorization": f"Bearer {openai_key}"},
             json={
                 "model": "gpt-4o-mini",
@@ -71,7 +73,7 @@ def get_embeddings(
 
     with httpx.Client() as client:
         response = client.post(
-            "https://api.openai.com/v1/embeddings",
+            f"{openai_base_url}/embeddings",
             headers={"Authorization": f"Bearer {openai_key}"},
             json={"input": texts, "model": model, "dimensions": dimensions},
         )
@@ -163,6 +165,47 @@ def search_opensearch(
         return [hit["_source"] for hit in response.json()["hits"]["hits"]]
 
 
+def generate_answer(
+    query: str, transformed: Dict[str, Any], references: List[Dict[str, Any]], openai_key: str
+) -> str:
+    """Generate answer using GPT-4o-mini based on retrieved documents."""
+    context = "\n\n".join(
+        [
+            f"Document {i + 1}:\n{ref.get('text', ref.get('content', str(ref)))}"
+            for i, ref in enumerate(references[:10])  # Limit to top 10 for token efficiency
+        ]
+    )
+
+    system_prompt = f"""You are a helpful assistant answering questions based on retrieved documents.
+
+Query Analysis:
+- Original query: {query}
+- Rewritten query: {transformed["rewrite"]}
+- Sub-questions: {transformed["sub_q"]}
+- Query type: {transformed["route"]}
+
+Instructions:
+- Answer based ONLY on the provided documents
+- If information is insufficient, state "Based on the available documents..."
+- Be concise but comprehensive
+- Cite specific details from the documents when relevant. Use [1] for the first document, etc."""
+
+    with httpx.Client() as client:
+        response = client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {openai_key}"},
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
+                ]
+            },
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="OpenSearch hybrid RAG query tool")
@@ -180,22 +223,25 @@ def main() -> None:
 
     # Step 1: Transform query
     transformed = transform_query(args.query, openai_key)
-    print(f"Query transformed: {transformed}")
 
     # Step 2: Get embeddings
     texts_to_embed = [transformed["rewrite"]] + transformed["sub_q"] + transformed["hyde_a"]
     embeddings = get_embeddings(texts_to_embed, args.model, args.dimensions, openai_key)
-    print(f"Generated {len(embeddings)} embeddings")
 
     # Step 3: Search OpenSearch
     ensure_pipeline_exists(os_endpoint, os_password)
     queries = build_hybrid_queries(transformed, embeddings)
-    results = search_opensearch(args.index, queries, os_endpoint, os_password)
+    references = search_opensearch(args.index, queries, os_endpoint, os_password)
 
-    # Output results
-    print(f"\nFound {len(results)} results:")
-    for i, hit in enumerate(results, 1):
-        print(f"{i}. {hit['filename']} (chunk {hit['chunk']}): {hit['text']}")
+    # Step 4: Generate answer
+    answer = generate_answer(args.query, transformed, references, openai_key)
+
+    response = {
+        "query": transformed,
+        "references": references,
+        "answer": answer,
+    }
+    print(json.dumps(response, indent=2))
 
 
 if __name__ == "__main__":
