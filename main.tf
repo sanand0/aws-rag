@@ -11,6 +11,7 @@ provider "aws" {}
 # Inputs
 variable "app_name" { type = string }
 variable "openai_api_key" { sensitive = true }
+variable "openai_base_url" { default = "https://api.openai.com/v1" }
 variable "image_tag" { default = "latest" }
 variable "opensearch_user" { default = "admin" }
 variable "opensearch_password" { sensitive = true }
@@ -91,7 +92,13 @@ resource "aws_apprunner_service" "app" {
       image_identifier      = local.image_uri
       image_configuration {
         port                          = "8000"
-        runtime_environment_variables = { OPENAI_API_KEY = var.openai_api_key }
+        runtime_environment_variables = {
+          OPENAI_API_KEY = var.openai_api_key
+          OPENAI_BASE_URL = var.openai_base_url
+          OPENSEARCH_ENDPOINT = "https://${aws_opensearch_domain.os.endpoint}"
+          OPENSEARCH_PASSWORD = var.opensearch_password
+          APP_NAME = var.app_name
+        }
       }
     }
 
@@ -137,7 +144,8 @@ resource "aws_opensearch_domain_policy" "os" {
     Statement = [{
       Effect    = "Allow"
       Principal = "*"
-      Action    = "es:*"
+      # Principal = "aws_iam_role.apprunner_instance.arn"
+      Action   = ["es:ESHttpGet", "es:ESHttpPost", "es:ESHttpPut", "es:ESHttpDelete"]
       Resource  = "${aws_opensearch_domain.os.arn}/*"
     }]
   })

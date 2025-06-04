@@ -1,6 +1,8 @@
 # Retrieval-Augmented Generation on AWS
 
-Learnings:
+A unified command-line tool and FastAPI application for document indexing and retrieval-augmented generation (RAG) search using OpenSearch and OpenAI embeddings.
+
+## Learnings
 
 - AWS offers [OpenSearch](https://opensearch.org/), their open-source fork of [ElasticSearch](https://www.elastic.co/elasticsearch).
   They don't update ElasticSearch versions, so it's a security risk.
@@ -20,39 +22,205 @@ Learnings:
   - `mappings.properties.text_embedding.space_type: "innerproduct"`: Can also use `l2` but `innerproduct` is closer to cosine similarity.
   - `mappings.properties.text_embedding.parameters.ef_construction: 128`: Size of k-NN list. High values are more accurate but slower
   - `mappings.properties.text_embedding.parameters.m: 24`: # of bidirectional links. More links are better but take up MUCH more memory.
+- Use hybrid search: BM25 for keyword search, k-NN for vector search, to get the best of both worlds
+- Use query rewriting to improve retrieval #TODO
+- Use citations as [1], [2], etc. This is consistent with OpenAI, Bing/Copilot, Perplexity, and DeepSeek. (Claude and Gemini use a different format.)
 
 ## Setup
+
+You need
+
+- [uv](https://docs.astral.sh/uv/)
+- [docker](https://www.docker.com/) or [podman](https://podman.io/)
+- OpenAI API access
+
+```bash
+# Clone the repo
+git clone https://github.com/sanand0/aws-rag.git
+
+# Set environment variables
+export OPENAI_BASE_URL="https://api.openai.com/v1"  # Optional, defaults to OpenAI
+export OPENAI_API_KEY="your-openai-api-key"
+export OPENSEARCH_ENDPOINT="https://localhost:9200"  # Or whenever your OpenSearch cluster is running
+export OPENSEARCH_PASSWORD="your-opensearch-password"
+export APP_NAME="aws-rag"
+
+# Run a single-node opensearch cluster
+docker run -d -p 9200:9200 -p 9600:9600 -e "discovery.type=single-node" -e "OPENSEARCH_INITIAL_ADMIN_PASSWORD=$OPENSEARCH_PASSWORD" opensearchproject/opensearch:2
+# Test OpenSearch
+curl -ku admin:$OPENSEARCH_PASSWORD $OPENSEARCH_ENDPOINT
+
+# Install with uv (recommended)
+uv run app.py --help
+```
+
+## Command Line Usage
+
+```bash
+# Index all files in a directory
+uv run app.py index docs/
+
+# Search your documents
+uv run app.py search "How do I configure authentication?"
+```
+
+### API Server Usage
+
+```bash
+# Start FastAPI server
+uv run app.py serve
+
+# Index via API
+curl -X POST "http://localhost:8000/index" \
+  -H "Content-Type: application/json" \
+  -d '{"paths": ["docs/"]}'
+
+# Search via API
+curl -X POST "http://localhost:8000/search" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "authentication setup"}'
+```
+
+## CLI Reference
+
+```bash
+# Index command
+uv run app.py index docs/ config/ *.md \
+  --root /project/root \
+  --index production-docs \
+  --splitter text \
+  --max-chars 1500 \
+  --model text-embedding-3-large \
+  --dimensions 1536
+```
+
+**Parameters:**
+
+- `paths`: File paths, globs, or directories (supports multiple)
+- `--root`: Root directory for relative paths (default: common path)
+- `--index`: Vector index name (default: "aws-rag")
+- `--splitter`: Text splitter type - "md" or "text" (default: "md")
+- `--max-chars`: Maximum chunk size in characters (default: 1000)
+- `--model`: OpenAI embedding model (default: "text-embedding-3-small")
+- `--dimensions`: Embedding dimensions (default: 384)
+
+```bash
+# Search command
+uv run app.py search "How to configure SSL certificates?" \
+  --index production-docs \
+  --model text-embedding-3-large \
+  --dimensions 1536
+```
+
+**Parameters:**
+
+- `query`: Search query string
+- `--index`: Vector index name (default: "aws-rag")
+- `--model`: OpenAI embedding model (default: "text-embedding-3-small")
+- `--dimensions`: Embedding dimensions (default: 384)
+
+```bash
+# Serve command
+uv run app.py serve
+```
+
+**Parameters:**
+
+- `--host`: Host to bind to (default: "127.0.0.1")
+- `--port`: Port to bind to (default: 8000)
+  uv run app.py serve --host 0.0.0.0 --port 8080
+
+```
+
+**Parameters:**
+- `--host`: Host to bind to (default: "127.0.0.1")
+- `--port`: Port to bind to (default: 8000)
+```
+
+## API Reference
+
+```bash
+# Index documents into the vector database.
+curl -X POST "http://localhost:8000/index" \
+  -H "Content-Type: application/json" \
+  -d '{"paths": ["docs/"]}'
+
+# Complete Request
+curl -X POST "http://localhost:8000/index" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paths": ["docs/", "config/", "*.md"],
+    "root": "/project/root",
+    "index": "production-docs",
+    "splitter": "text",
+    "max_chars": 1500,
+    "model": "text-embedding-3-large",
+    "dimensions": 1536
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "status": "success",
+  "files_processed": 42
+}
+```
+
+```bash
+# Search documents using hybrid RAG.
+curl -X POST "http://localhost:8000/search" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "How to configure authentication?"}'
+
+# Complete request
+curl -X POST "http://localhost:8000/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How to configure SSL certificates in production?",
+    "index": "production-docs",
+    "model": "text-embedding-3-large",
+    "dimensions": 1536
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "query": {
+    "summary": "User asking about SSL certificate configuration",
+    "rewrite": "ssl certificate configuration production setup",
+    "sub_q": ["How to generate SSL certificates?", "Where to install certificates?"],
+    "hyde_a": ["SSL certificates are configured in the web server.", "Certificate files are placed in /etc/ssl/."],
+    "route": "PROCEDURAL"
+  },
+  "references": [
+    {
+      "text": "To configure SSL certificates...",
+      "filename": "ssl-guide.md",
+      "chunk": 0
+    }
+  ],
+  "answer": "Based on the available documents, SSL certificates are configured by..."
+}
+```
+
+## License
+
+[MIT](LICENSE)
+
+### Deploy on AWS
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_DEFAULT_REGION=...
-export TF_VAR_app_name=aws-rag
-export TF_VAR_openai_api_key=...
-export TF_VAR_opensearch_password=...
-
-# Run OpenSearch 2.x as a daemon
-docker run -d -p 9200:9200 -p 9600:9600 -e "discovery.type=single-node" -e "OPENSEARCH_INITIAL_ADMIN_PASSWORD=$TF_VAR_opensearch_password" opensearchproject/opensearch:2
-export OS_ENDPOINT=https://localhost:9200
-
-# Test OpenSearch
-curl -ku admin:$TF_VAR_opensearch_password $OS_ENDPOINT
-
-# Index documents
-uv run index.py --index $TF_VAR_app_name path/to/docs
-
-# Check index size
-curl -ku admin:$TF_VAR_opensearch_password "$OS_ENDPOINT/$TF_VAR_app_name/_count"
-
-# Search
-uv run search.py "What is the meaning of life?" --index $TF_VAR_app_name
-```
-
-### Deploy on AWS
-
-```bash
-docker build -t aws-rag .
-docker run -e OPENAI_API_KEY="$TF_VAR_openai_api_key" -p 8000:8000 aws-rag
+export TF_VAR_openai_base_url="$OPENAI_BASE_URL"
+export TF_VAR_openai_api_key="$OPENAI_API_KEY"
+export TF_VAR_opensearch_password="$OPENSEARCH_PASSWORD"
+export TF_VAR_app_name="$APP_NAME"
 
 # Install tofu (one-time)
 sudo snap install tofu --classic
@@ -68,7 +236,7 @@ Test via:
 curl "https://$(tofu output -raw service_url)/"
 
 # Check the OpenSearch endpoint
-curl -u admin:$TF_VAR_opensearch_password "https://$(tofu output -raw opensearch_endpoint)/_cluster/health?pretty"
+curl -u admin:$OPENSEARCH_PASSWORD "https://$(tofu output -raw opensearch_endpoint)/_cluster/health?pretty"
 ```
 
 To destroy, use:
